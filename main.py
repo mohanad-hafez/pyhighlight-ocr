@@ -47,6 +47,10 @@ Rectangle = namedtuple('Rectangle', ['xmin', 'ymin', 'xmax', 'ymax'])
 # https://stackoverflow.com/questions/27152904/calculate-overlapped-area-between-two-rectangles
 
 
+
+# Set path to Tesseract executable
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
 class Levels:
     PAGE = 1
     BLOCK = 2
@@ -353,6 +357,70 @@ def image_to_string(img_src):
     return pytesseract.image_to_string(
         img_src, lang='eng', config='--psm 6')
 
+def detect_highlights(img_src):
+    """Detect highlighted areas of any color.
+    
+    This approach uses the following principles:
+    1. Highlighted areas have higher saturation than plain paper
+    2. We use adaptive thresholding to separate highlights from regular text
+    3. We combine multiple features (saturation, value, local contrast) for better accuracy
+    """
+    # Convert to HSV
+    img_hsv = cv2.cvtColor(img_src, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(img_hsv)
+    
+    # Convert to grayscale for text detection
+    img_gray = cv2.cvtColor(img_src, cv2.COLOR_BGR2GRAY)
+    
+    # Step 1: Find areas with high saturation (highlighted areas)
+    # Calculate saturation statistics to set adaptive threshold
+    sat_mean = np.mean(s)
+    sat_std = np.std(s)
+    sat_thresh = sat_mean + (1.5 * sat_std)  # More adaptive threshold
+    
+    # Create a binary mask where saturation is higher than threshold
+    _, sat_mask = cv2.threshold(s, sat_thresh, 255, cv2.THRESH_BINARY)
+    
+    # Step 2: Find text areas (we want to focus on highlighted text, not just highlights)
+    # Use Otsu's method to find text
+    _, text_mask = cv2.threshold(img_gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Step 3: Create a local variance map to find areas with high contrast (like text on highlight)
+    # This helps distinguish between plain highlight and highlighted text
+    local_var = cv2.GaussianBlur(img_gray, (5, 5), 0)
+    local_var = cv2.Laplacian(local_var, cv2.CV_8U)
+    _, var_mask = cv2.threshold(local_var, 5, 255, cv2.THRESH_BINARY)
+    
+    # Step 4: Combine the masks
+    # Areas with high saturation AND (text OR high local contrast)
+    text_or_contrast = cv2.bitwise_or(text_mask, var_mask)
+    combined_mask = cv2.bitwise_and(sat_mask, text_or_contrast)
+    
+    # Step 5: Clean up the mask with morphological operations
+    kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    kernel_medium = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    
+    # First close small gaps
+    highlight_mask = cv2.morphologyEx(combined_mask, cv2.MORPH_CLOSE, kernel_small)
+    
+    # Then open to remove small noise
+    highlight_mask = cv2.morphologyEx(highlight_mask, cv2.MORPH_OPEN, kernel_small)
+    
+    # One more closing to connect nearby areas that are likely part of the same highlight
+    highlight_mask = cv2.morphologyEx(highlight_mask, cv2.MORPH_CLOSE, kernel_medium, iterations=2)
+    
+    # Step 6: Filter out areas that are too small to be highlighted text
+    contours, _ = cv2.findContours(highlight_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_highlight_area = 100  # Minimum area to be considered a highlight (adjust based on image resolution)
+    
+    # Create empty mask and only draw contours that meet the size threshold
+    filtered_mask = np.zeros_like(highlight_mask)
+    for contour in contours:
+        if cv2.contourArea(contour) >= min_highlight_area:
+            cv2.drawContours(filtered_mask, [contour], 0, 255, -1)
+    
+    return filtered_mask
+
 
 def main(args):
     img_input = str(args.img_input)
@@ -367,16 +435,22 @@ def main(args):
     data_ocr = image_to_data(img_thresh)
 
     # yellow highlight colour range
-    hsv_lower = [22, 30, 30]
-    hsv_upper = [45, 255, 255]
+    # hsv_lower = [22, 30, 30]
+    # hsv_upper = [45, 255, 255]
 
-    # Color segmentation
-    img_mask, img_hsv = mask_image(
-        img_orig, hsv_lower, hsv_upper)
+    # # Color segmentation
+    # img_mask, img_hsv = mask_image(
+    #     img_orig, hsv_lower, hsv_upper)
 
-    # Noise reduction
-    img_mask_denoised = denoise_image(
-        img_mask)
+    # # Noise reduction
+    # img_mask_denoised = denoise_image(
+    #     img_mask)
+
+    img_mask_denoised = detect_highlights(img_orig)
+
+    img_mask = img_mask_denoised 
+
+    img_hsv = cv2.cvtColor(img_orig, cv2.COLOR_BGR2HSV)
 
     # Apply mask on original image
     img_orig_masked = apply_mask(img_orig, img_mask=img_mask_denoised)
